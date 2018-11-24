@@ -3,6 +3,9 @@
 //
 // Not to be confused with Secure FTP which is a much later and more complex protocol
 //
+// By Tony Hoyle <tony@hoyle.me.uk>
+// Licensed under the GNU GPL
+//
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
