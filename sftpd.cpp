@@ -40,9 +40,11 @@ typedef struct __state {
 
 static void vlog(int priority, const char *format, va_list vargs)
 {
-    vsyslog(priority, format, vargs);
+    char tmp[256];
+    vsnprintf(tmp, sizeof(tmp), format, vargs);
+    syslog(priority, "%s", tmp);
     if(flags.foreground)
-        vfprintf(stderr, format, vargs);
+        fprintf(stderr, "%s\n", tmp);
 }
 
 static void log(int priority, const char *format, ...)
@@ -120,27 +122,27 @@ int opensocket()
     struct addrinfo* res=0;
     int err=getaddrinfo(hostname,portname,&hints,&res);
     if (err!=0) {
-        die("failed to resolve local socket address (err=%d)",err);
+        die("failed to resolve local socket address: %s",gai_strerror(err));
     }
 
     int server_fd=socket(res->ai_family,res->ai_socktype,res->ai_protocol);
     if (server_fd==-1) {
-        die("%s",strerror(errno));
+        die("Unable to open socket: %s",strerror(errno));
     }
 
     int reuseaddr=1;
     if (setsockopt(server_fd,SOL_SOCKET,SO_REUSEADDR,&reuseaddr,sizeof(reuseaddr))==-1) {
-        die("%s",strerror(errno));
+        die("Unable to set socket options: %s",strerror(errno));
     }
 
     if (bind(server_fd,res->ai_addr,res->ai_addrlen)==-1) {
-        die("%s",strerror(errno));
+        die("Unable to bind: %s",strerror(errno));
     }
 
     freeaddrinfo(res);
 
     if (listen(server_fd,SOMAXCONN)) {
-        die("failed to listen for connections (errno=%d)",errno);
+        die("failed to listen for connections: %s",strerror(errno));
     }
     
     return server_fd;
@@ -564,7 +566,7 @@ void stor(state_t *state, const char *args)
 
 void usage(const char *cmd)
 {
-    fprintf(stderr, "Usage: %s [--verbose][--foreground][--inetd][-v][-f][-i]", cmd);
+    fprintf(stderr, "Usage: %s [--debug][--foreground][--inetd][-d][-f][-i]\n", cmd);
 }
 
 int main(int argc, char **argv)
@@ -575,6 +577,7 @@ int main(int argc, char **argv)
         {"debug",      no_argument,   0, 'd'},
         {"foreground", no_argument,   0, 'f'},
         {"inetd",      no_argument,   0, 'i'},
+        {"help",       no_argument,   0, 'h'},
         {0}
     };
 
@@ -582,7 +585,7 @@ int main(int argc, char **argv)
         /* getopt_long stores the option index here. */
         int option_index = 0;
 
-        int c = getopt_long (argc, argv, "dfi",
+        int c = getopt_long (argc, argv, "dfih",
                         long_options, &option_index);
 
         /* Detect the end of the options. */
@@ -592,6 +595,7 @@ int main(int argc, char **argv)
             case 'd': flags.debug = true; break;
             case 'f': flags.foreground = true; break;
             case 'i': flags.inetd = true; break;
+            case 'h': usage(argv[0]); return 0;
             case '?': break;
             default: abort();
         }
