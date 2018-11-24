@@ -40,6 +40,9 @@ typedef struct __state {
 
 static void vlog(int priority, const char *format, va_list vargs)
 {
+    if((priority == LOG_DEBUG) && !flags.debug)
+        return;
+
     char tmp[256];
     vsnprintf(tmp, sizeof(tmp), format, vargs);
     syslog(priority, "%s", tmp);
@@ -613,6 +616,7 @@ int main(int argc, char **argv)
     }
 
     openlog("slog", LOG_PID|LOG_CONS, LOG_DAEMON);
+    log(LOG_INFO, "sftp daemon starting up");
     int fd;
     if(flags.inetd)
         fd = 0;
