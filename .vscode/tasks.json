@@ -6,12 +6,8 @@
         {
             "label": "build sftp",
             "type": "shell",
-            "command": "g++",
-            "args": [
-                "-g", "-o", "sftpd",
-                "-l", "pam",
-                "sftpd.cpp"
-            ],
+            "command": "make",
+            "args": [],
             "group" :{
                 "kind": "build",
                 "isDefault": true

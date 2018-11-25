@@ -77,8 +77,9 @@ static int reply(int fd, const char *format, ...)
 
     va_list vargs;
     va_start (vargs, format);
-    int len = vsnprintf (buf, sizeof(buf), format, vargs);
+    int len = vsnprintf (buf, sizeof(buf), format, vargs) +1;
     va_end (vargs);
+    printf("%d: %s\n", len, buf);
     return write(fd, buf, len);
 }
 
@@ -116,11 +117,9 @@ int opensocket()
     const char* hostname=0; /* wildcard */
     const char* portname="115";
 
-    struct addrinfo hints;
-    memset(&hints,0,sizeof(hints));
+    struct addrinfo hints = {0};
     hints.ai_family=AF_UNSPEC;
     hints.ai_socktype=SOCK_STREAM;
-    hints.ai_protocol=0;
     hints.ai_flags=AI_PASSIVE|AI_ADDRCONFIG;
     struct addrinfo* res=0;
     int err=getaddrinfo(hostname,portname,&hints,&res);
@@ -147,6 +146,8 @@ int opensocket()
     if (listen(server_fd,SOMAXCONN)) {
         die("failed to listen for connections: %s",strerror(errno));
     }
+
+    log(LOG_DEBUG, "Socket %d created", server_fd);
     
     return server_fd;
 }
@@ -235,6 +236,7 @@ void handle_session(int fd, const char *remote_host)
     for(;;) {
         if(readcmd(fd, cmd, sizeof(cmd)) < 0)
             return;
+        if(!*cmd) continue;
         log(LOG_DEBUG, "Command received: %s", cmd);
         char *args = strchr(cmd, ' ');
         if(args != NULL) 
@@ -576,7 +578,6 @@ int main(int argc, char **argv)
 {
     static struct option long_options[] =
     {
-        /* These options set a flag. */
         {"debug",      no_argument,   0, 'd'},
         {"foreground", no_argument,   0, 'f'},
         {"inetd",      no_argument,   0, 'i'},
@@ -598,9 +599,10 @@ int main(int argc, char **argv)
             case 'd': flags.debug = true; break;
             case 'f': flags.foreground = true; break;
             case 'i': flags.inetd = true; break;
-            case 'h': usage(argv[0]); return 0;
-            case '?': break;
-            default: abort();
+            case 'h':
+            case ':': 
+            case '?': usage(argv[0]); return 0;
+          default: abort();
         }
     }
 
