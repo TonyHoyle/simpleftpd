@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <getopt.h>
 #include <unistd.h>
@@ -18,91 +19,6 @@ struct server_state {
 };
 
 static bool debug = false;
-
-void handle_ls(int server_fd, const char *args)
-{
-
-}
-
-void handle_get(int server_fd, const char *args)
-{
-
-}
-
-void handle_put(int server_fd, const char *args)
-{
-
-}
-
-void handle_rename(int server_fd, const char *args)
-{
-
-}
-
-void handle_remove(int server_fd, const char *args)
-{
-
-}
-
-void handle_cd(int server_fd, const char *args)
-{
-
-}
-
-void handle_help()
-{
-
-}
-
-bool parse_line(int server_fd, const char *cmd, const char *args)
-{
-    if(!strcasecmp(cmd, "quit") || !strcasecmp(cmd, "exit"))
-        return false;
-
-    if(!*cmd)
-        return true;
-
-    if(!strcasecmp(cmd, "ls")) handle_ls(server_fd, args);
-    else if(!strcasecmp(cmd, "get")) handle_get(server_fd, args);
-    else if(!strcasecmp(cmd, "put")) handle_put(server_fd, args);
-    else if(!strcasecmp(cmd, "mv")) handle_rename(server_fd, args);
-    else if(!strcasecmp(cmd, "rm")) handle_remove(server_fd, args);
-    else if(!strcasecmp(cmd, "cd")) handle_cd(server_fd, args);
-    else if(!strcasecmp(cmd, "help")) handle_help();
-    else if(!strcasecmp(cmd, "?")) handle_help();
-    else printf("Invalid command %s\n", cmd);
-    return true;
-}
-
-void read_commands(int server_fd)
-{
-    while(true) {
-        char *line = readline("sftp> ");
-
-        if(!line) break;
-        if(*line) add_history(line);
-
-        char *args = strchr(line, ' ');
-        const char *cmd = line;
-        if(args) *(args++)='\0';
-        if(!parse_line(server_fd, cmd, args)) break;
-
-        free(line);
-    }
-}
-
-int echo_set(bool on)
-{
-    struct termios flags;
-
-    if (tcgetattr (0, &flags) != 0)
-        return -1;
-    if(on) flags.c_lflag |= ECHO;
-    else flags.c_lflag &= ~ECHO;
-    if (tcsetattr (0, TCSAFLUSH, &flags) != 0)
-        return -1;
-    return 0;
-}
 
 static int readcmd(int fd, char *buf, int maxlen)
 {
@@ -141,11 +57,14 @@ bool server_send(server_state *state, const char *line)
     return l>0;
 }
 
-bool server_cmd(server_state *state, const char *cmd, const char *args)
+bool server_cmd(server_state *state, const char *cmd, ...)
 {
     char line[256];
+    va_list vargs;
 
-    snprintf(line, sizeof(line), "%s %s", cmd, args);
+    va_start (vargs, cmd);
+    vsnprintf(line, sizeof(line), cmd, vargs);
+    va_end(vargs);
     if(!server_send(state, line)) 
         return false;
     if(!server_read(state))
@@ -154,6 +73,140 @@ bool server_cmd(server_state *state, const char *cmd, const char *args)
         fprintf(stderr,"Error: %s\n", state->last_line);
     }
     return true;
+}
+
+void handle_ls(struct server_state *state, const char *args)
+{
+    if(server_cmd(state, "LIST F %s", args))
+        fprintf(stderr, "%s\n", state->last_line);
+}
+
+void handle_get(struct server_state *state, const char *args)
+{
+    const char *filename = basename(args);
+
+    if(!server_cmd(state, "RETR %s", args))
+        return;
+    long length = strtoul(state->last_line, NULL, 10);
+    void *buf = malloc(length);
+    if(!buf) {
+        fprintf(stderr, "Couldn't allocate memory: %s", filename, strerror(errno));
+        server_cmd(state, "STOP");
+        return;
+    }
+    FILE *f = fopen(filename, "w");
+    if(!f) {
+        fprintf(stderr, "Couldn't create %s: %s", filename, strerror(errno));
+        server_cmd(state, "STOP");
+        free(buf);
+        return;
+    }
+    
+    server_send(state, "SEND"); 
+    length = recv(state->fd, buf, length, 0);
+    if(length < 1) {
+        fprintf(stderr, "Couldn't read file: %s", strerror(errno));
+        free(buf);
+        return;
+    }
+    fwrite(buf, length, 1, f);
+    fclose(f);
+    free(buf);
+    printf("Read %ld bytes into %s\n",length, filename);
+}
+
+void handle_put(struct server_state *state, const char *args)
+{
+
+}
+
+void handle_rename(struct server_state *state, const char *args)
+{
+
+}
+
+void handle_remove(struct server_state *state, const char *args)
+{
+    if(server_cmd(state, "KILL %s", args))
+        fprintf(stderr, "%s\n", state->last_line);
+}
+
+void handle_cd(struct server_state *state, const char *args)
+{
+    if(server_cmd(state, "CDIR %s", args))
+        fprintf(stderr, "%s\n", state->last_line);
+}
+
+void handle_type(struct server_state *state, const char *args)
+{
+    if(!args) args="b";
+    char c=tolower(args[0]);
+    if((c!='a' && c!='b' && c!='c')||args[1]) {
+        fprintf(stderr,"Usage: type {a|b|c}\n");
+        return;
+    }
+    if(server_cmd(state, "TYPE %c", c))
+        fprintf(stderr, "%s\n", state->last_line);
+}
+
+void handle_help()
+{
+    fprintf(stderr, "Insert help here\n");
+}
+
+bool parse_line(struct server_state *state, const char *cmd, const char *args)
+{
+    if(!strcasecmp(cmd, "quit") || !strcasecmp(cmd, "exit"))
+        return false;
+
+    if(!*cmd)
+        return true;
+
+    if(!strcasecmp(cmd, "ls")) handle_ls(state, args);
+    else if(!strcasecmp(cmd, "get")) handle_get(state, args);
+    else if(!strcasecmp(cmd, "put")) handle_put(state, args);
+    else if(!strcasecmp(cmd, "mv")) handle_rename(state, args);
+    else if(!strcasecmp(cmd, "rm")) handle_remove(state, args);
+    else if(!strcasecmp(cmd, "cd")) handle_cd(state, args);
+    else if(!strcasecmp(cmd, "type")) handle_type(state, args);
+    else if(!strcasecmp(cmd, "help")) handle_help();
+    else if(!strcasecmp(cmd, "?")) handle_help();
+    else printf("Invalid command %s\n", cmd);
+    return true;
+}
+
+void read_commands(int server_fd)
+{
+    struct server_state state = {0};
+
+    state.fd = server_fd;
+
+    while(true) {
+        char *line = readline("sftp> ");
+
+        if(!line) break;
+        if(*line) add_history(line);
+
+        char *args = strchr(line, ' ');
+        const char *cmd = line;
+        if(args) *(args++)='\0';
+        if(!parse_line(&state, cmd, args)) break;
+
+        free(line);
+    }
+}
+
+int echo_set(bool on)
+{
+    struct termios flags;
+
+    if (tcgetattr (0, &flags) != 0)
+        return -1;
+    if(on) flags.c_lflag |= ECHO;
+    else flags.c_lflag &= ~ECHO;
+    if (tcsetattr (0, TCSAFLUSH, &flags) != 0)
+        return -1;
+    return 0;
 }
 
 bool login(struct server_state *state, const char *username, const char *password)
@@ -191,17 +244,14 @@ bool login(struct server_state *state, const char *username, const char *passwor
         password=alloc_password;
     }
 
-    if(!server_cmd(state, "USER", username) || state->last_result != '+')  {
-        printf("1\n");
+    if(!server_cmd(state, "USER %s", username) || state->last_result != '+')  {
         goto exit;
     }
 
-    if(!server_cmd(state, "PASS", password) || state->last_result !='!') {
-        printf("2\n");
+    if(!server_cmd(state, "PASS %s", password) || state->last_result !='!') {
         goto exit;
     }
 
-    printf("3\n");
     result = true;
 
 exit:

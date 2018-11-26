@@ -52,8 +52,6 @@ static void vlog(int priority, const char *format, va_list vargs)
 
 static void log(int priority, const char *format, ...)
 {
-    char buf[256];
-
     va_list vargs;
     va_start (vargs, format);
     vlog(priority, format, vargs);
@@ -238,9 +236,13 @@ void handle_session(int fd, const char *remote_host)
             return;
         if(!*cmd) continue;
         log(LOG_DEBUG, "Command received: %s", cmd);
-        char *args = strchr(cmd, ' ');
-        if(args != NULL) 
-            *(args++)='\0';
+        if(cmd[4] && cmd[4] !=' ') {
+            reply(fd, "-%s Bad Command", cmd);
+            continue;
+        }
+        cmd[4] = '\0';
+        const char *args = cmd+5;
+        if(!*args) args=NULL;
         
         if(!strcasecmp(cmd, "DONE")) {
             reply(fd, "+%s closing connection", hostname);
