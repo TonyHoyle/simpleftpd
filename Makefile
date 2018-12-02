@@ -1,9 +1,9 @@
-CFLAGS=-g
+CPPFLAGS=-g
 LDFLAGS=-lpam -lreadline
 
 all: sftp sftpd
 
-sftp: sftp.cpp
+sftp: sftp.cpp buffer.cpp buffer.h
 
 sftpd: sftpd.cpp
 

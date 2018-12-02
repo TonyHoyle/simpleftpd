@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -23,20 +24,23 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <getopt.h>
+#include <string>
+#include <algorithm>
 
-static struct __flags {
+static struct ___flags {
     bool debug;
     bool foreground;
     bool inetd;
 } flags;
 
-typedef struct __state {
+struct state_t {
     int fd;
     const char *user;
     bool loggedin;
     bool binary;
     FILE *current_file;
-} state_t;
+    std::string current_filename;
+};
 
 static void vlog(int priority, const char *format, va_list vargs)
 {
@@ -75,24 +79,25 @@ static int reply(int fd, const char *format, ...)
 
     va_list vargs;
     va_start (vargs, format);
-    int len = vsnprintf (buf, sizeof(buf), format, vargs) +1;
+    int len = vsnprintf (buf, sizeof(buf), format, vargs);
     va_end (vargs);
-    printf("%d: %s\n", len, buf);
-    return write(fd, buf, len);
+    if(flags.debug) printf("%d: %s\n", len, buf);
+    return write(fd, buf, len+1);
 }
 
 // Partial replies end in CRLF not NULL
 static int reply_partial(int fd, const char *format, ...)
 {
-    char buf[256];
+    char buf[256] = {0};
 
     va_list vargs;
     va_start (vargs, format);
     int len = vsnprintf (buf, sizeof(buf), format, vargs);
     va_end (vargs);
-    buf[len-1] = '\r';
-    buf[len] = '\n';
-    return write(fd, buf, len+1);
+    buf[len] = '\r';
+    buf[len+1] = '\n';
+    if(flags.debug) printf("%d: %s\n", len, buf);
+    return write(fd, buf, len+2);
 }
 
 static int readcmd(int fd, char *buf, int maxlen)
@@ -190,30 +195,34 @@ void dispatch(int server_fd)
     }
 }
 
-void user(state_t *state, const char *args);
-void acct(state_t *state, const char *args);
-void pass(state_t *state, const char *args);
-void type(state_t *state, const char *args);
-void list(state_t *state, const char *args);
-void cdir(state_t *state, const char *args);
-void kill(state_t *state, const char *args);
-void name(state_t *state, const char *args);
-void retr(state_t *state, const char *args);
-void stor(state_t *state, const char *args);
+void handle_user(state_t *state, const char *args);
+void handle_acct(state_t *state, const char *args);
+void handle_pass(state_t *state, const char *args);
+void handle_type(state_t *state, const char *args);
+void handle_list(state_t *state, const char *args);
+void handle_cdir(state_t *state, const char *args);
+void handle_kill(state_t *state, const char *args);
+void handle_name(state_t *state, const char *args);
+void handle_retr(state_t *state, const char *args);
+void handle_stor(state_t *state, const char *args);
+void handle_send(state_t *state, const char *args);
+void handle_size(state_t *state, const char *args);
 
 struct __cmd { const char *cmd; void(*handler)(state_t *, const char *); };
 static struct __cmd cmds[] = 
 {
-    { "USER", user},
-    { "ACCT", acct},
-    { "PASS", pass},
-    { "TYPE", type},
-    { "LIST", list},
-    { "CDIR", cdir},
-    { "KILL", kill},
-    { "NAME", name},
-    { "RETR", retr},
-    { "STOR", stor},
+    { "USER", handle_user},
+    { "ACCT", handle_acct},
+    { "PASS", handle_pass},
+    { "TYPE", handle_type},
+    { "LIST", handle_list},
+    { "CDIR", handle_cdir},
+    { "KILL", handle_kill},
+    { "NAME", handle_name},
+    { "RETR", handle_retr},
+    { "STOR", handle_stor},
+    { "SEND", handle_send},
+    { "SIZE", handle_size},
     { 0, 0}
 };
 
@@ -264,7 +273,7 @@ void handle_session(int fd, const char *remote_host)
 
 ///////////////////////////////////////////////////////
 
-void user(state_t *state, const char *args)
+void handle_user(state_t *state, const char *args)
 {
     if(state->loggedin) {
         reply(state->fd, "-Already logged in");
@@ -274,7 +283,7 @@ void user(state_t *state, const char *args)
     reply(state->fd, "+%s ok, send password", state->user);
 }
 
-void acct(state_t *state, const char *args)
+void handle_acct(state_t *state, const char *args)
 {
     reply(state->fd, "-Not implemented");
 }
@@ -304,7 +313,7 @@ static int my_conv(int num_msg, const struct pam_message **msg,
     return PAM_SUCCESS;    
 }
 
-void pass(state_t *state, const char *args)
+void handle_pass(state_t *state, const char *args)
 {
     if(state->loggedin) {
         reply(state->fd, "-Already logged in");
@@ -366,7 +375,7 @@ void pass(state_t *state, const char *args)
     pam_end(pamh, result);
 }
 
-void type(state_t *state, const char *args)
+void handle_type(state_t *state, const char *args)
 {
     if(!state->loggedin) {
         reply(state->fd,"-Not logged in");
@@ -413,6 +422,22 @@ static void list_files(state_t *state, const char *dir)
     closedir(entry);
 }
 
+static char *perms(mode_t mode, char *res)
+{
+    res[0] = S_ISDIR(mode) ? 'd' : '-';
+    res[1] = (mode & S_IRUSR) ? 'r' : '-';
+    res[2] = (mode & S_IWUSR) ? 'w' : '-';
+    res[3] = (mode & S_IXUSR) ? 'x' : '-';
+    res[4] = (mode & S_IRGRP) ? 'r' : '-';
+    res[5] = (mode & S_IWGRP) ? 'w' : '-';
+    res[6] = (mode & S_IXGRP) ? 'x' : '-';
+    res[7] = (mode & S_IROTH) ? 'r' : '-';
+    res[8] = (mode & S_IWOTH) ? 'w' : '-';
+    res[9] = (mode & S_IXOTH) ? 'x' : '-';
+    res[10] = '\0';
+    return res;
+}
+
 static void list_verbose(state_t *state, const char *dir)
 {
     DIR *entry = opendir(dir);
@@ -421,13 +446,17 @@ static void list_verbose(state_t *state, const char *dir)
         return;
     }
 
-    char curdir[256];
-    reply_partial(state->fd, "+%s", getcwd(curdir, sizeof(curdir)));
+    char line[256], perm[12];
+    reply_partial(state->fd, "+%s", getcwd(line, sizeof(line)));
 
     struct dirent *ent;
     while(ent = readdir(entry)) {
-        //TODO: Build ls -l results
-        reply_partial(state->fd, ent->d_name);
+        struct stat stat;
+        if(fstatat(dirfd(entry), ent->d_name, &stat, 0))
+            snprintf(line, sizeof(line), "%s %8s [%s]", perms(0, perm), "", ent->d_name);
+        else
+            snprintf(line, sizeof(line), "%s %8ld %s", perms(stat.st_mode, perm), stat.st_size, ent->d_name);
+        reply_partial(state->fd, line);
     }
 
     reply(state->fd,"");
@@ -435,7 +464,7 @@ static void list_verbose(state_t *state, const char *dir)
     closedir(entry);
 }
 
-void list(state_t *state, const char *args)
+void handle_list(state_t *state, const char *args)
 {
     if(!state->loggedin) {
         reply(state->fd,"-Not logged in");
@@ -451,7 +480,7 @@ void list(state_t *state, const char *args)
 
     if(args[1]) args+=2;
     else   
-        args=NULL;
+        args=".";
 
     switch(kind) {
         case 'f': list_files(state, args); break;
@@ -461,14 +490,14 @@ void list(state_t *state, const char *args)
     }
 }
 
-void cdir(state_t *state, const char *args)
+void handle_cdir(state_t *state, const char *args)
 {
     if(!state->loggedin) {
         reply(state->fd,"-Not logged in");
         return;
     }
 
-    if(chdir(args)) {
+    if(!chdir(args)) {
         char cwd[128];
         reply(state->fd, "!Changed working-dir to %s",getcwd(cwd, sizeof(cwd)));
     } else {
@@ -476,7 +505,7 @@ void cdir(state_t *state, const char *args)
     }
 }
 
-void kill(state_t *state, const char *args)
+void handle_kill(state_t *state, const char *args)
 {
     if(!state->loggedin) {
         reply(state->fd,"-Not logged in");
@@ -486,7 +515,7 @@ void kill(state_t *state, const char *args)
     reply(state->fd, "-Not implemented");
 }
 
-void name(state_t *state, const char *args)
+void handle_name(state_t *state, const char *args)
 {
     if(!state->loggedin) {
         reply(state->fd,"-Not logged in");
@@ -496,7 +525,7 @@ void name(state_t *state, const char *args)
     reply(state->fd, "-Not implemented");
 }
 
-void retr(state_t *state, const char *args)
+void handle_retr(state_t *state, const char *args)
 {
     if(!state->loggedin) {
         reply(state->fd,"-Not logged in");
@@ -507,11 +536,11 @@ void retr(state_t *state, const char *args)
         fclose(state->current_file);
     }
 
-    log(LOG_DEBUG, "Read file ",args);
+    log(LOG_DEBUG, "Read file %s",args);
 
-    state->current_file = fopen(args, state->binary?"b":"t");
+    state->current_file = fopen(args, state->binary?"rb":"r");
     if(state->current_file == NULL) {
-        log(LOG_INFO, "Read failed: %s", strerror(errno));
+        log(LOG_INFO, "Unable to open file: %s", strerror(errno));
         reply(state->fd, "-%s", strerror(errno));
         return;
     }
@@ -522,7 +551,7 @@ void retr(state_t *state, const char *args)
     reply(state->fd, " %ld", len);
 }
 
-void send(state_t *state, const char *args)
+void handle_send(state_t *state, const char *args)
 {
    if(!state->loggedin) {
         reply(state->fd,"-Not logged in");
@@ -535,16 +564,58 @@ void send(state_t *state, const char *args)
     }
 
     char mem[BUFSIZ];
-    int len;
+    int len,total;
 
-    while(len=fread(mem, 1024, 1, state->current_file)>0) {
+    total=0;
+    while((len=fread(mem, 1, BUFSIZ, state->current_file))>0) {
         write(state->fd, mem, len);
+        total+=len;
     }
+
+    log(LOG_DEBUG,"Sent %d bytes", total);
     fclose(state->current_file);
     state->current_file = NULL;
 }
 
-void stop(state_t *state, const char *args)
+void handle_size(state_t *state, const char *args)
+{
+   if(!state->loggedin) {
+        reply(state->fd,"-Not logged in");
+        return;
+    }
+
+    if(!state->current_file) {
+        reply(state->fd,"-Bad command");
+        return;
+    }
+
+    int size = atoi(args);
+
+    if(size<1) {
+        reply(state->fd,"-Invalid size");
+        return;
+    }
+
+    reply(state->fd,"+ok, waiting for file");
+
+    char mem[BUFSIZ];
+    int len,total;
+
+    total=0;
+    while(size > 0 && (len=recv(state->fd, mem, std::min(size, BUFSIZ), 0))>0) {
+        fwrite(mem, len, 1, state->current_file);
+        total+=len;
+        size-= len;
+    }
+
+    log(LOG_DEBUG,"Received %d bytes", total);
+    fclose(state->current_file);
+
+    reply(state->fd,"+Saved %s", state->current_filename.c_str());
+    state->current_file = NULL;
+}
+
+void handle_stop(state_t *state, const char *args)
 {
     if(!state->loggedin) {
         reply(state->fd,"-Not logged in");
@@ -561,14 +632,57 @@ void stop(state_t *state, const char *args)
     reply(state->fd, "+ok, RETR aborted");
 }
 
-void stor(state_t *state, const char *args)
+void handle_stor(state_t *state, const char *args)
 {
+    const char *file;
+    FILE *filep;
+
     if(!state->loggedin) {
         reply(state->fd,"-Not logged in");
         return;
     }
 
-    reply(state->fd, "-Not implemented");
+    if(args[3] != ' ') {
+        reply(state->fd, "-Invalid arguments");
+        return;
+    }
+
+    if(state->current_file) {
+        fclose(state->current_file);
+        state->current_file = NULL;
+    }
+
+    file = args+4;
+
+    if(!strncasecmp(args, "NEW", 3)) {
+        if(access( file, F_OK ) != -1) {
+            reply(state->fd,"-File exists");
+            return;
+        }
+        filep = fopen(file, state->binary?"wb":"w");
+        if(!filep) {
+            reply(state->fd,"-Error %s", strerror(errno));
+            return;
+        }
+        reply(state->fd,"+Will create new file");
+    } else if(!strncasecmp(args, "OLD", 3)) {
+        filep = fopen(file, state->binary?"wb":"w");
+        if(!filep) {
+            reply(state->fd,"-Error %s", strerror(errno));
+            return;
+        }
+        reply(state->fd,"+Will write to file"); // Or create or open, according to docs, but meh.
+    } else if(!strncasecmp(args, "APP", 3)) {
+        filep = fopen(file, state->binary?"ab":"a");
+        if(!filep) {
+            reply(state->fd,"-Error %s", strerror(errno));
+            return;
+        }
+        reply(state->fd,"+Will append to file");
+    }
+
+    state->current_file = filep;
+    state->current_filename = file;
 }
 
 void usage(const char *cmd)

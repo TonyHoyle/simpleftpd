@@ -11,40 +11,61 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <termios.h>
+#include "buffer.h"
 
 struct server_state {
     int fd;
     char last_result;
-    char last_line[256];
+    char *last_line;
+    int buf_len;
+    char *buf;
+    socketbuffer *buffer;
+
+    server_state(int socket);
+    ~server_state();
 };
 
 static bool debug = false;
 
-static int readcmd(int fd, char *buf, int maxlen)
+server_state::server_state(int socket)
 {
-    char *p = buf;
-    int len;
+    fd = socket;
+    last_result = 0;
+    last_line = NULL;
+    buf = (char*)malloc(BUFSIZ);
+    buf_len = BUFSIZ;
+    buffer = new socketbuffer(socket);
+}
 
-    maxlen--; 
-    while((len = recv(fd, p, 1, 0))> 0) {
-        if(!*(p++)) return(p-buf);
-        if((p-buf)>=maxlen) break;
-    }
-    *(p++)='\0'; /* Always null terminate even on failure */
-    if(len <0) return -1;
-    else return(p-buf);
+server_state::~server_state() 
+{
+    free((void*)buf);
+    delete buffer;
 }
 
 bool server_read(server_state *state) 
 {
-    char line[sizeof(state->last_line)+1];
-    int l;
+    char *ptr = state->buf;
+    int len = state->buf_len;
+    int count = 0;
 
-    l = readcmd(state->fd, line, sizeof(line));
-    if(l<1) return false;
-    state->last_result = line[0];
-    strncpy(state->last_line, line+1, sizeof(state->last_line));
-    if(debug) fprintf(stderr,"%s\n", line);
+    while(state->buffer->read(ptr,1)>0)
+    {
+        if(*(ptr++) == '\0')
+            break;
+        count++;
+        len--;
+        if(!len) {
+            state->buf_len += BUFSIZ;
+            len += BUFSIZ;
+            state->buf = (char*)realloc((void*)state->buf, state->buf_len);
+            ptr = state->buf + count;
+        }
+    }
+
+    state->last_result = state->buf[0];
+    state->last_line = state->buf+1;
+    if(debug) fprintf(stderr,"%s\n", state->buf);
     return true;
 }
 
@@ -65,10 +86,14 @@ bool server_cmd(server_state *state, const char *cmd, ...)
     va_start (vargs, cmd);
     vsnprintf(line, sizeof(line), cmd, vargs);
     va_end(vargs);
-    if(!server_send(state, line)) 
+    if(!server_send(state, line)) {
+        if(debug) fprintf(stderr, "server_send aborted\n");
         return false;
-    if(!server_read(state))
+    }
+    if(!server_read(state)) {
+        if(debug) fprintf(stderr, "server_read aborted\n");
         return false;
+    }
     if(state->last_result == '-') {
         fprintf(stderr,"Error: %s\n", state->last_line);
     }
@@ -77,12 +102,34 @@ bool server_cmd(server_state *state, const char *cmd, ...)
 
 void handle_ls(struct server_state *state, const char *args)
 {
-    if(server_cmd(state, "LIST F %s", args))
+    bool ret;
+
+    if(!args || !*args) 
+      ret = server_cmd(state, "LIST F");
+    else
+      ret = server_cmd(state, "LIST F %s", args);
+    if(ret)
+        fprintf(stderr, "%s\n", state->last_line);
+}
+
+void handle_lls(struct server_state *state, const char *args)
+{
+    bool ret;
+
+    if(!args || !*args) 
+      ret = server_cmd(state, "LIST V");
+    else
+      ret = server_cmd(state, "LIST V %s", args);
+    if(ret)
         fprintf(stderr, "%s\n", state->last_line);
 }
 
 void handle_get(struct server_state *state, const char *args)
 {
+    if(!args || !*args) {
+        fprintf(stderr, "Usage: get <file>\n");
+        return;
+    }
     const char *filename = basename(args);
 
     if(!server_cmd(state, "RETR %s", args))
@@ -90,13 +137,13 @@ void handle_get(struct server_state *state, const char *args)
     long length = strtoul(state->last_line, NULL, 10);
     void *buf = malloc(length);
     if(!buf) {
-        fprintf(stderr, "Couldn't allocate memory: %s", filename, strerror(errno));
+        fprintf(stderr, "Couldn't allocate memory: %s\n", filename, strerror(errno));
         server_cmd(state, "STOP");
         return;
     }
     FILE *f = fopen(filename, "w");
     if(!f) {
-        fprintf(stderr, "Couldn't create %s: %s", filename, strerror(errno));
+        fprintf(stderr, "Couldn't create %s: %s\n", filename, strerror(errno));
         server_cmd(state, "STOP");
         free(buf);
         return;
@@ -105,19 +152,54 @@ void handle_get(struct server_state *state, const char *args)
     server_send(state, "SEND"); 
     length = recv(state->fd, buf, length, 0);
     if(length < 1) {
-        fprintf(stderr, "Couldn't read file: %s", strerror(errno));
+        fprintf(stderr, "Couldn't read file: %s\n", strerror(errno));
         free(buf);
         return;
     }
     fwrite(buf, length, 1, f);
     fclose(f);
     free(buf);
-    printf("Read %ld bytes into %s\n",length, filename);
 }
 
 void handle_put(struct server_state *state, const char *args)
 {
+    if(!args || !*args) {
+        fprintf(stderr, "Usage: put <file>\n");
+        return;
+    }
+    const char *filename = basename(args);
 
+    if(!server_cmd(state, "STOR OLD %s", args) || state->last_result != '+')
+        return;
+
+    FILE *f = fopen(filename,"r");
+    if(!f) {
+        fprintf(stderr, "Couldn't open %s: %s\n", filename, strerror(errno));
+        server_cmd(state, "STOP");
+        return;
+    }
+
+    fseek(f,0,SEEK_END);
+    long length = ftell(f);
+    fseek(f,0,SEEK_SET);
+
+    void *buf = malloc(length);
+    length = fread(buf, 1, length, f);
+
+    if(!server_cmd(state, "SIZE %ld", length) || state->last_result != '+') {
+        fclose(f);
+        free(buf);
+        return;
+    }
+
+    send(state->fd, buf, length, 0);
+    fclose(f);
+    free(buf);
+
+    if(!server_read(state)) {
+        if(debug) fprintf(stderr, "server_read aborted\n");
+    }
+    printf(state->last_line);
 }
 
 void handle_rename(struct server_state *state, const char *args)
@@ -127,12 +209,20 @@ void handle_rename(struct server_state *state, const char *args)
 
 void handle_remove(struct server_state *state, const char *args)
 {
+    if(!args || !*args) {
+        fprintf(stderr, "Usage: rm <file>\n");
+        return;
+    }
     if(server_cmd(state, "KILL %s", args))
         fprintf(stderr, "%s\n", state->last_line);
 }
 
 void handle_cd(struct server_state *state, const char *args)
 {
+    if(!args || !*args) {
+        fprintf(stderr, "Usage: cd <directory>\n");
+        return;
+    }
     if(server_cmd(state, "CDIR %s", args))
         fprintf(stderr, "%s\n", state->last_line);
 }
@@ -163,6 +253,7 @@ bool parse_line(struct server_state *state, const char *cmd, const char *args)
         return true;
 
     if(!strcasecmp(cmd, "ls")) handle_ls(state, args);
+    else if(!strcasecmp(cmd, "lls")) handle_lls(state, args);
     else if(!strcasecmp(cmd, "get")) handle_get(state, args);
     else if(!strcasecmp(cmd, "put")) handle_put(state, args);
     else if(!strcasecmp(cmd, "mv")) handle_rename(state, args);
@@ -177,9 +268,7 @@ bool parse_line(struct server_state *state, const char *cmd, const char *args)
 
 void read_commands(int server_fd)
 {
-    struct server_state state = {0};
-
-    state.fd = server_fd;
+    server_state state(server_fd);
 
     while(true) {
         char *line = readline("sftp> ");
@@ -245,10 +334,12 @@ bool login(struct server_state *state, const char *username, const char *passwor
     }
 
     if(!server_cmd(state, "USER %s", username) || state->last_result != '+')  {
+        if(debug) fprintf(stderr,"USER failed, aborting\n");
         goto exit;
     }
 
     if(!server_cmd(state, "PASS %s", password) || state->last_result !='!') {
+        if(debug) fprintf(stderr,"PASS failed, aborting\n");
         goto exit;
     }
 
@@ -265,7 +356,7 @@ int connect_server(const char *server, const char *username, const char *passwor
 {
     int result;
     struct addrinfo hints = {0}, *info, *p;
-    struct server_state state = {0};
+    int fd;
 
     hints.ai_socktype = SOCK_STREAM;
     if((result=getaddrinfo(server, "115", &hints, &info)) != 0) {
@@ -274,11 +365,11 @@ int connect_server(const char *server, const char *username, const char *passwor
     }
     
     for(p=info; p; p=p->ai_next) {
-        if((state.fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) > 0) {
-            if(connect(state.fd, p->ai_addr, p->ai_addrlen) == 0)
+        if((fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) > 0) {
+            if(connect(fd, p->ai_addr, p->ai_addrlen) == 0)
                 break; 
             result = errno;
-            close(state.fd);
+            close(fd);
         }
     }
 
@@ -287,8 +378,9 @@ int connect_server(const char *server, const char *username, const char *passwor
         return -1;
     }
 
+    server_state state(fd);
+
     if(!login(&state, username, password)) {
-        close(state.fd);
         return -1;
     }
 
