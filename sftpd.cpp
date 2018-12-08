@@ -203,6 +203,7 @@ void handle_list(state_t *state, const char *args);
 void handle_cdir(state_t *state, const char *args);
 void handle_kill(state_t *state, const char *args);
 void handle_name(state_t *state, const char *args);
+void handle_tobe(state_t *state, const char *args);
 void handle_retr(state_t *state, const char *args);
 void handle_stor(state_t *state, const char *args);
 void handle_send(state_t *state, const char *args);
@@ -219,6 +220,7 @@ static struct __cmd cmds[] =
     { "CDIR", handle_cdir},
     { "KILL", handle_kill},
     { "NAME", handle_name},
+    { "TOBE", handle_tobe},
     { "RETR", handle_retr},
     { "STOR", handle_stor},
     { "SEND", handle_send},
@@ -511,8 +513,12 @@ void handle_kill(state_t *state, const char *args)
         reply(state->fd,"-Not logged in");
         return;
     }
-
-    reply(state->fd, "-Not implemented");
+    
+    if(remove(args)) {
+        reply(state->fd, "-Not deleted because %s", strerror(errno));
+    }
+    else
+        reply(state->fd, "+%s deleted", args);
 }
 
 void handle_name(state_t *state, const char *args)
@@ -521,8 +527,36 @@ void handle_name(state_t *state, const char *args)
         reply(state->fd,"-Not logged in");
         return;
     }
-    
-    reply(state->fd, "-Not implemented");
+
+    if(access(args, F_OK)) {
+        reply(state->fd, "-Can't find %s", args);
+        return;
+    }
+
+    state->current_filename = args;
+    reply(state->fd, "+File exists");
+}
+
+void handle_tobe(state_t *state, const char *args)
+{
+    if(!state->loggedin) {
+        reply(state->fd,"-Not logged in");
+        return;
+    }
+
+    if(state->current_filename.empty() || state->current_file != NULL) {
+        reply(state->fd,"-Sequence error");
+        return;
+    }
+
+    if(rename(state->current_filename.c_str(), args)) {
+        reply(state->fd, "-File wasn't renamed because %s", strerror(errno));
+        state->current_filename.clear();
+        return;
+    }
+
+    reply(state->fd, "+%s renamed to %s",state->current_filename.c_str(), args);
+    state->current_filename.clear();
 }
 
 void handle_retr(state_t *state, const char *args)
@@ -534,6 +568,7 @@ void handle_retr(state_t *state, const char *args)
 
     if(state->current_file) {
         fclose(state->current_file);
+        state->current_filename.clear();
     }
 
     log(LOG_DEBUG, "Read file %s",args);
@@ -575,6 +610,7 @@ void handle_send(state_t *state, const char *args)
     log(LOG_DEBUG,"Sent %d bytes", total);
     fclose(state->current_file);
     state->current_file = NULL;
+    state->current_filename.clear();
 }
 
 void handle_size(state_t *state, const char *args)
@@ -613,6 +649,7 @@ void handle_size(state_t *state, const char *args)
 
     reply(state->fd,"+Saved %s", state->current_filename.c_str());
     state->current_file = NULL;
+    state->current_filename.clear();
 }
 
 void handle_stop(state_t *state, const char *args)
@@ -629,6 +666,7 @@ void handle_stop(state_t *state, const char *args)
 
     fclose(state->current_file);
     state->current_file = NULL;
+    state->current_filename.clear();
     reply(state->fd, "+ok, RETR aborted");
 }
 

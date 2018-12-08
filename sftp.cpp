@@ -96,6 +96,7 @@ bool server_cmd(server_state *state, const char *cmd, ...)
     }
     if(state->last_result == '-') {
         fprintf(stderr,"Error: %s\n", state->last_line);
+        return false;
     }
     return true;
 }
@@ -199,12 +200,35 @@ void handle_put(struct server_state *state, const char *args)
     if(!server_read(state)) {
         if(debug) fprintf(stderr, "server_read aborted\n");
     }
-    printf(state->last_line);
+    printf("%s\n", state->last_line);
 }
 
 void handle_rename(struct server_state *state, const char *args)
 {
+    if(!args || !*args) {
+        fprintf(stderr, "Usage: rename <file1> <file2>\n");
+        return;
+    }
 
+    const char *file1, *file2;
+    file1 = file2 = args;
+    while(!*file2 && !isspace(*file2))
+        file2++; // TODO: Quote handling
+  
+    if(*file2) *(char*)(file2++) = '\0';
+    while(*file2 && isspace(*file2)) file2++;
+    if(!*file2) {
+        fprintf(stderr, "Usage: rename <file1> <file2>\n");
+        return;
+    }
+
+    if(!server_cmd(state, "NAME %s", file1))
+        return;
+    
+    if(!server_cmd(state, "TOBE %s", file2))
+        return;
+
+    printf("%s\n", state->last_line);
 }
 
 void handle_remove(struct server_state *state, const char *args)
@@ -227,6 +251,17 @@ void handle_cd(struct server_state *state, const char *args)
         fprintf(stderr, "%s\n", state->last_line);
 }
 
+void handle_lcd(struct server_state *state, const char *args)
+{
+    if(!args || !*args) {
+        fprintf(stderr, "Usage: lcd <directory>\n");
+        return;
+    }
+
+    if(chdir(args))
+        fprintf(stderr, "Error: %s\n", strerror(errno));
+}
+
 void handle_type(struct server_state *state, const char *args)
 {
     if(!args) args="b";
@@ -241,7 +276,15 @@ void handle_type(struct server_state *state, const char *args)
 
 void handle_help()
 {
-    fprintf(stderr, "Insert help here\n");
+    printf("ls\t\tList files\n");
+    printf("lls\t\tList files verbosely\n");
+    printf("get <file>\tRetrieve file from server\n");
+    printf("put <file>\tSend file to server");
+    printf("mv <from> <to>\tRename file\n");
+    printf("rm <file>\tDelete file\n");
+    printf("cd\t\tChange remote directory\n");
+    printf("lcd\t\tChange local directory\n");
+    printf("type <a|b>\tAscii or Binary mode\n");
 }
 
 bool parse_line(struct server_state *state, const char *cmd, const char *args)
@@ -259,6 +302,7 @@ bool parse_line(struct server_state *state, const char *cmd, const char *args)
     else if(!strcasecmp(cmd, "mv")) handle_rename(state, args);
     else if(!strcasecmp(cmd, "rm")) handle_remove(state, args);
     else if(!strcasecmp(cmd, "cd")) handle_cd(state, args);
+    else if(!strcasecmp(cmd, "lcd")) handle_lcd(state, args);
     else if(!strcasecmp(cmd, "type")) handle_type(state, args);
     else if(!strcasecmp(cmd, "help")) handle_help();
     else if(!strcasecmp(cmd, "?")) handle_help();
